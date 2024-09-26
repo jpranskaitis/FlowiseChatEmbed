@@ -25,7 +25,10 @@ import { cancelAudioRecording, startAudioRecording, stopAudioRecording } from '@
 import { LeadCaptureBubble } from '@/components/bubbles/LeadCaptureBubble';
 import { removeLocalStorageChatHistory, getLocalStorageChatflow, setLocalStorageChatflow, setCookie, getCookie } from '@/utils';
 import { cloneDeep } from 'lodash';
-import { fetchEventSource } from '@microsoft/fetch-event-source';
+import { EventStreamContentType, fetchEventSource } from '@microsoft/fetch-event-source';
+
+class RetriableError extends Error { }
+class FatalError extends Error { }
 
 export type FileEvent<T = EventTarget> = {
   target: T;
@@ -549,10 +552,45 @@ export const Bot = (botProps: BotProps & { class?: string }) => {
       async onclose() {
         closeResponse();
       },
+      async onopen(response) {
+        if (response.ok && response.headers.get('content-type') === EventStreamContentType) {
+          return; // everything's good
+        } else if (response.status == 429){
+
+          const reader = response.body.getReader();
+          const decoder = new TextDecoder(); // If the content is text-based, otherwise skip this line
+          let result = '';
+      
+          while (true) {
+              const { done, value } = await reader.read();
+              if (done) {
+                  break;
+              }
+              // If using TextDecoder
+              result += decoder.decode(value, { stream: true });
+              
+              // If not using TextDecoder (for binary data)
+              // result += new TextDecoder().decode(value); // For text-based streams
+          }
+      
+          // If you're using a TextDecoder, make sure to decode any remaining chunks.
+          result += decoder.decode();
+          setMessages((prevMessages) => [...prevMessages, { message: '', type: 'apiMessage' }]);
+          updateLastMessage(result);
+        } else if (response.status >= 400 && response.status < 500) {
+            throw new FatalError();
+        } else {
+            throw new RetriableError();
+        }
+      },
       onerror(err) {
         console.error('EventSource Error: ', err);
         closeResponse();
+        abortMessage()
+        throw err;
       },
+    }).catch((er) => {
+      console.log(er)
     });
   };
 
